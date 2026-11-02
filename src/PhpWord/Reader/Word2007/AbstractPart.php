@@ -83,6 +83,14 @@ abstract class AbstractPart
     protected $commentRefs = [];
 
     /**
+     * Ids of the comments whose range has been opened by a `w:commentRangeStart`
+     * and which are waiting for the next element to be read, in document order.
+     *
+     * @var string[]
+     */
+    private $pendingCommentRangeStarts = [];
+
+    /**
      * Image Loading.
      *
      * @var bool
@@ -151,23 +159,129 @@ abstract class AbstractPart
     }
 
     /**
-     * Set comment reference.
+     * Ensure that a comment reference exists for the given identifier, so that a
+     * comment which is only delimited by a range can be linked to its elements.
      */
-    private function setCommentReference(string $type, string $id, AbstractElement $element): self
+    private function ensureCommentReference(string $id): void
     {
-        if (!in_array($type, ['start', 'end'])) {
-            throw new InvalidArgumentException('Type must be "start" or "end"');
-        }
-
         if (!array_key_exists($id, $this->commentRefs)) {
             $this->commentRefs[$id] = [
                 'start' => null,
                 'end' => null,
             ];
         }
-        $this->commentRefs[$id][$type] = $element;
+    }
+
+    /**
+     * Set comment reference.
+     *
+     * A reference which has already been set by a range marker is only
+     * overwritten when the new reference is the more accurate one.
+     */
+    private function setCommentReference(string $type, string $id, AbstractElement $element, bool $overwrite = false): self
+    {
+        if (!in_array($type, ['start', 'end'])) {
+            throw new InvalidArgumentException('Type must be "start" or "end"');
+        }
+
+        $this->ensureCommentReference($id);
+
+        if ($overwrite || $this->commentRefs[$id][$type] === null) {
+            $this->commentRefs[$id][$type] = $element;
+        }
 
         return $this;
+    }
+
+    /**
+     * Read w:commentRangeStart: the comment range begins with the next element
+     * which will be read.
+     */
+    private function openCommentRange(XMLReader $xmlReader, DOMElement $domNode): void
+    {
+        $id = $xmlReader->getAttribute('w:id', $domNode);
+        if (null === $id) {
+            return;
+        }
+
+        $this->ensureCommentReference($id);
+        $this->pendingCommentRangeStarts[] = $id;
+    }
+
+    /**
+     * Read w:commentRangeEnd: the comment range ends with the last element which
+     * has been read in the current container.
+     *
+     * @param AbstractContainer $parent
+     */
+    private function closeCommentRange(XMLReader $xmlReader, DOMElement $domNode, $parent): void
+    {
+        $id = $xmlReader->getAttribute('w:id', $domNode);
+        if (null === $id) {
+            return;
+        }
+
+        $this->ensureCommentReference($id);
+        $this->pendingCommentRangeStarts = array_values(array_filter(
+            $this->pendingCommentRangeStarts,
+            function (string $pendingId) use ($id): bool {
+                return $pendingId !== $id;
+            }
+        ));
+
+        $element = $this->getLastElement($parent);
+        if (null === $element) {
+            return;
+        }
+
+        $this->setCommentReference('end', $id, $element, true);
+        // The range could have been opened and closed without any element in
+        // between: the element which closes the range starts it as well.
+        $this->setCommentReference('start', $id, $element);
+    }
+
+    /**
+     * Link the comments which are waiting for their range to begin to the element
+     * which has just been read.
+     *
+     * @param AbstractContainer $parent
+     * @param int $elementCount Number of elements the container held before the element was read
+     */
+    private function linkPendingCommentRangeStarts($parent, int $elementCount): void
+    {
+        if (empty($this->pendingCommentRangeStarts)) {
+            return;
+        }
+
+        if (!$parent instanceof AbstractContainer || $parent->countElements() <= $elementCount) {
+            // Nothing has been read since the beginning of the range
+            return;
+        }
+
+        $element = $parent->getElement($elementCount);
+        if (null === $element) {
+            return;
+        }
+
+        foreach ($this->pendingCommentRangeStarts as $id) {
+            $this->setCommentReference('start', $id, $element);
+        }
+
+        $this->pendingCommentRangeStarts = [];
+    }
+
+    /**
+     * Returns the last element of a container.
+     *
+     * @param AbstractContainer $parent
+     */
+    private function getLastElement($parent): ?AbstractElement
+    {
+        if (!$parent instanceof AbstractContainer || $parent->countElements() === 0) {
+            return null;
+        }
+
+        return $parent->getElement($parent->countElements() - 1);
     }
 
     /**
@@ -464,6 +578,8 @@ abstract class AbstractPart
      */
     protected function readRun(XMLReader $xmlReader, DOMElement $domNode, $parent, $docPart, $paragraphStyle = null): void
     {
+        $elementCount = $parent instanceof AbstractContainer ? $parent->countElements() : 0;
+
         if (in_array($domNode->nodeName, ['w:ins', 'w:del', 'w:smartTag', 'w:hyperlink', 'w:commentReference'])) {
             $nodes = $xmlReader->getElements('*', $domNode);
             foreach ($nodes as $node) {
@@ -475,7 +591,15 @@ abstract class AbstractPart
             foreach ($nodes as $node) {
                 $this->readRunChild($xmlReader, $node, $parent, $docPart, $paragraphStyle, $fontStyle);
             }
+        } elseif ($domNode->nodeName == 'w:commentRangeStart') {
+            // The commented range begins with the next element read
+            $this->openCommentRange($xmlReader, $domNode);
+        } elseif ($domNode->nodeName == 'w:commentRangeEnd') {
+            // The commented range ends with the last element read
+            $this->closeCommentRange($xmlReader, $domNode, $parent);
         }
+
+        $this->linkPendingCommentRangeStarts($parent, $elementCount);
 
         if ($xmlReader->elementExists('.//*["commentReference"=local-name()]', $domNode)) {
             $node = iterator_to_array($xmlReader->getElements('.//*["commentReference"=local-name()]', $domNode))[0];
@@ -483,8 +607,12 @@ abstract class AbstractPart
             if ($attributeIdentifier) {
                 $id = $attributeIdentifier->nodeValue;
 
-                $this->setCommentReference('start', $id, $parent->getElement($parent->countElements() - 1));
-                $this->setCommentReference('end', $id, $parent->getElement($parent->countElements() - 1));
+                $element = $this->getLastElement($parent);
+                if (null !== $element) {
+                    // A comment without a range is linked to the element holding its reference
+                    $this->setCommentReference('start', $id, $element);
+                    $this->setCommentReference('end', $id, $element);
+                }
             }
         }
     }

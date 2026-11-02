@@ -233,6 +233,12 @@ class Word2007Test extends \PHPUnit\Framework\TestCase
         $fontStyle = $comment->getElement(0)->getFontStyle();
         self::assertInstanceOf(Font::class, $fontStyle);
         self::assertEquals('de-DE', $fontStyle->getLang()->getLatin());
+        // The range of the comment begins on the deleted "T" and ends on the inserted "t"
+        /** @var TextRun $textRun */
+        $textRun = $phpWord->getSection(0)->getElement(0);
+        self::assertInstanceOf(TextRun::class, $textRun);
+        self::assertSame($textRun->getElement(1), $comment->getStartElement());
+        self::assertSame($textRun->getElement(2), $comment->getEndElement());
 
         /** @var Comment $comment */
         $comment = $phpWord->getComments()->getItem(1);
@@ -247,6 +253,9 @@ class Word2007Test extends \PHPUnit\Framework\TestCase
         $fontStyle = $comment->getElement(0)->getFontStyle();
         self::assertInstanceOf(Font::class, $fontStyle);
         self::assertEquals('de-DE', $fontStyle->getLang()->getLatin());
+        // The range of the comment is reduced to the single "t" it is anchored on
+        self::assertSame($textRun->getElement(4), $comment->getStartElement());
+        self::assertSame($textRun->getElement(4), $comment->getEndElement());
     }
 
     public function testLoadFormula(): void

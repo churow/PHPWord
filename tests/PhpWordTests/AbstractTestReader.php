@@ -19,6 +19,7 @@
 namespace PhpOffice\PhpWordTests;
 
 use PhpOffice\PhpWord\PhpWord;
+use PhpOffice\PhpWord\Reader\Word2007\AbstractPart;
 use ZipArchive;
 
 /**
@@ -32,6 +33,7 @@ abstract class AbstractTestReader extends \PHPUnit\Framework\TestCase
         'footnotes' => ['class' => 'PhpOffice\PhpWord\Reader\Word2007\Footnotes',   'xml' => '<w:footnotes xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{toReplace}</w:footnotes>'],
         'endnotes' => ['class' => 'PhpOffice\PhpWord\Reader\Word2007\Endnotes',    'xml' => '<w:endnotes xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{toReplace}</w:endnotes>'],
         'settings' => ['class' => 'PhpOffice\PhpWord\Reader\Word2007\Settings',    'xml' => '<w:comments xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{toReplace}</w:comments>'],
+        'comments' => ['class' => 'PhpOffice\PhpWord\Reader\Word2007\Comments',    'xml' => '<w:comments xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{toReplace}</w:comments>'],
     ];
 
     /**
@@ -52,11 +54,15 @@ abstract class AbstractTestReader extends \PHPUnit\Framework\TestCase
         $zip->close();
 
         $phpWord = new PhpWord();
+        $commentRefs = [];
         foreach ($this->parts as $partName => $part) {
             if (array_key_exists($partName, $partXmls)) {
                 $className = $this->parts[$partName]['class'];
+                /** @var AbstractPart $reader */
                 $reader = new $className($file, "{$partName}.xml");
+                $reader->setCommentReferences($commentRefs);
                 $reader->read($phpWord);
+                $commentRefs = $reader->getCommentReferences();
             }
         }
         unlink($file);
